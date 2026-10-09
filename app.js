@@ -9,7 +9,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const EMAIL_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/;
 
 const view = document.getElementById('view');
-const ui = { tab: 'home', utility: 'electricity', period: 'months', message: '' };
+const ui = { tab: 'home', utility: 'electricity', period: 'months', message: '', editing: null };
 let state = load();
 
 // ---------- storage ----------
@@ -237,18 +237,26 @@ function historyView() {
   const byId = Object.fromEntries(Calc.intervals(state.readings, u.key).map((iv) => [iv.id, iv]));
   const rows = Calc.sorted(state.readings, u.key).reverse().map((r) => {
     const iv = byId[r.id];
+    if (r.id === ui.editing) {
+      return `<tr class="editing"><td colspan="5"><form id="edit-form">
+        <div class="field"><label for="edit-value">Reading on ${dateLabel(r.date)}</label>
+          <div class="with-unit"><input id="edit-value" name="reading" inputmode="decimal" autocomplete="off" value="${r.value}" required><span>${esc(unit(u.key))}</span></div></div>
+        <div class="row"><button class="btn">Save</button><button type="button" class="btn plain" data-action="cancel-edit">Cancel</button></div>
+        <p class="muted" role="status" style="margin-top:10px"></p>
+      </form></td></tr>`;
+    }
     return `<tr><td>${dateLabel(r.date)}${r.reset ? '<div class="muted">new meter</div>' : ''}</td>
       <td>${fmt(r.value)}</td>
       <td>${iv ? `+${fmt(iv.usage)}` : '–'}</td>
       <td>${iv ? `${fmt(iv.rate)}${iv.anomaly ? ' ⚠' : ''}` : '–'}</td>
-      <td><button type="button" class="del" data-delete="${r.id}" aria-label="Delete reading of ${dateLabel(r.date)}">✕</button></td></tr>`;
+      <td class="actions"><button type="button" class="icon" data-edit="${r.id}" aria-label="Edit reading of ${dateLabel(r.date)}">✎</button><button type="button" class="icon" data-delete="${r.id}" aria-label="Delete reading of ${dateLabel(r.date)}">✕</button></td></tr>`;
   }).join('');
 
   return `<section class="card">
     ${utilityPicker()}
     ${rows
       ? `<table style="margin-top:12px"><tr><th>Date</th><th>Reading</th><th>Used</th><th>Per day</th><th></th></tr>${rows}</table>
-         <p class="muted" style="margin-top:8px">⚠ marks a daily rate more than 1.5× the recent norm. To correct a reading, save it again for the same date.</p>`
+         <p class="muted" style="margin-top:8px">⚠ marks a daily rate more than 1.5× the recent norm. Tap ✎ to correct a reading.</p>`
       : '<p class="muted" style="margin-top:16px">No readings yet.</p>'}
   </section>`;
 }
@@ -290,42 +298,63 @@ function render() {
     else b.removeAttribute('aria-current');
   });
   if (ui.tab === 'stats' && document.getElementById('readout')) selectBar(chartRows.length - 1);
+  const editValue = document.getElementById('edit-value');
+  if (editValue) editValue.focus();
 }
 
 // ---------- actions ----------
 
+function formError(form, msg) {
+  form.querySelector('[role=status]').innerHTML = `<span class="error">${esc(msg)}</span>`;
+}
+
+// Returns NaN for anything that is not a usable meter reading.
+function parseReading(raw) {
+  const value = raw.trim() ? Number(raw.trim().replace(',', '.')) : NaN;
+  return Number.isFinite(value) && value >= 0 ? value : NaN;
+}
+
+// Checks a reading against its neighbours in time. `original` is the reading being edited, if any.
+// Returns { error }, { reset } when it can be saved, or null if the user backed out.
+function checkReading(u, date, value, original) {
+  const others = Calc.sorted(state.readings, u.key).filter((r) => r.date !== date && r !== original);
+  const prev = others.filter((r) => r.date < date).at(-1);
+  const next = others.find((r) => r.date > date);
+  let reset = false;
+  if (prev && value < prev.value) {
+    // Already saved as the start of a new meter: no need to ask again.
+    if (!(original && original.reset)) {
+      // A later reading that carries on from the old one means this is a typo, not a new meter.
+      if (next && !next.reset && next.value >= prev.value) {
+        return { error: `${u.name}: ${value} is lower than the earlier reading (${prev.value} on ${dateLabel(prev.date)}).` };
+      }
+      const ok = confirm(`${u.name}: ${value} is lower than the previous reading (${prev.value} on ${dateLabel(prev.date)}).\n\n` +
+        'Was the meter replaced or reset?\nOK – save it as the start of a new meter.\nCancel – go back and correct it.');
+      if (!ok) return null;
+    }
+    reset = true;
+  }
+  if (next && !next.reset && value > next.value) {
+    return { error: `${u.name}: ${value} is higher than the later reading (${next.value} on ${dateLabel(next.date)}).` };
+  }
+  return { reset };
+}
+
 function saveReadings(form) {
   const date = form.elements.date.value;
-  const fail = (msg) => {
-    form.querySelector('[role=status]').innerHTML = `<span class="error">${esc(msg)}</span>`;
-  };
+  const fail = (msg) => formError(form, msg);
   if (!date || date > today()) return fail('Pick a date that is not in the future.');
 
   const pending = [];
   for (const u of UTILS) {
     const raw = form.elements[u.key].value.trim();
     if (!raw) continue;
-    const value = Number(raw.replace(',', '.'));
-    if (!Number.isFinite(value) || value < 0) return fail(`${u.name}: "${raw}" is not a valid reading.`);
-
-    const others = Calc.sorted(state.readings, u.key).filter((r) => r.date !== date);
-    const prev = others.filter((r) => r.date < date).at(-1);
-    const next = others.find((r) => r.date > date);
-    let reset = false;
-    if (prev && value < prev.value) {
-      // A later reading that carries on from the old one means this is a typo, not a new meter.
-      if (next && !next.reset && next.value >= prev.value) {
-        return fail(`${u.name}: ${value} is lower than the earlier reading (${prev.value} on ${dateLabel(prev.date)}).`);
-      }
-      const ok = confirm(`${u.name}: ${value} is lower than the previous reading (${prev.value} on ${dateLabel(prev.date)}).\n\n` +
-        'Was the meter replaced or reset?\nOK – save it as the start of a new meter.\nCancel – go back and correct it.');
-      if (!ok) return;
-      reset = true;
-    }
-    if (next && !next.reset && value > next.value) {
-      return fail(`${u.name}: ${value} is higher than the later reading (${next.value} on ${dateLabel(next.date)}).`);
-    }
-    pending.push({ id: `${u.key}-${date}`, utility: u.key, date, value, reset });
+    const value = parseReading(raw);
+    if (Number.isNaN(value)) return fail(`${u.name}: "${raw}" is not a valid reading.`);
+    const res = checkReading(u, date, value);
+    if (!res) return;
+    if (res.error) return fail(res.error);
+    pending.push({ id: `${u.key}-${date}`, utility: u.key, date, value, reset: res.reset });
   }
   if (!pending.length) return fail('Enter at least one reading.');
 
@@ -333,6 +362,27 @@ function saveReadings(form) {
   state.readings = state.readings.filter((r) => !ids.has(r.id)).concat(pending);
   save();
   ui.message = `Saved ${pending.length} reading${pending.length > 1 ? 's' : ''} for ${dateLabel(date)}.`;
+  render();
+}
+
+function saveEdit(form) {
+  const original = state.readings.find((r) => r.id === ui.editing);
+  if (!original) {
+    ui.editing = null;
+    return render();
+  }
+  const u = UTILS.find((x) => x.key === original.utility);
+  const fail = (msg) => formError(form, msg);
+  const raw = form.elements.reading.value.trim();
+  const value = parseReading(raw);
+  if (Number.isNaN(value)) return fail(`"${raw}" is not a valid reading.`);
+  const res = checkReading(u, original.date, value, original);
+  if (!res) return;
+  if (res.error) return fail(res.error);
+
+  Object.assign(original, { value, reset: res.reset });
+  save();
+  ui.editing = null;
   render();
 }
 
@@ -423,7 +473,7 @@ async function importBackup(file) {
 // ---------- events ----------
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-tab],[data-utility],[data-period],[data-action],[data-delete],[data-bar]');
+  const t = e.target.closest('[data-tab],[data-utility],[data-period],[data-action],[data-edit],[data-delete],[data-bar]');
   if (!t) return;
   const d = t.dataset;
   if (d.bar !== undefined) return selectBar(Number(d.bar));
@@ -436,6 +486,7 @@ document.addEventListener('click', (e) => {
     state.readings = state.readings.filter((x) => x !== r);
     save();
   }
+  ui.editing = d.edit || null; // any other navigation closes an open edit
   if (d.tab) ui.tab = d.tab;
   if (d.utility) ui.utility = d.utility;
   if (d.period) ui.period = d.period;
@@ -450,6 +501,7 @@ view.addEventListener('pointerover', (e) => {
 view.addEventListener('submit', (e) => {
   e.preventDefault();
   if (e.target.id === 'reading-form') saveReadings(e.target);
+  if (e.target.id === 'edit-form') saveEdit(e.target);
   if (e.target.id === 'settings-form') saveSettings(e.target);
 });
 

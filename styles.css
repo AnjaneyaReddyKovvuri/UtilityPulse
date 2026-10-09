@@ -108,7 +108,9 @@ table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th, td { padding: 8px 4px; text-align: right; border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 th { color: var(--text-2); font-weight: 500; border-top: 0; }
 th:first-child, td:first-child { text-align: left; }
-.del { background: none; border: 0; color: var(--text-2); font-size: 1.1rem; padding: 4px 8px; cursor: pointer; }
+.icon { background: none; border: 0; color: var(--text-2); font-size: 1.1rem; padding: 4px 6px; cursor: pointer; }
+.actions { white-space: nowrap; }
+.editing td { padding: 12px 0; }
 
 /* bottom navigation */
 .tabs {
