@@ -1,6 +1,6 @@
 // Offline support: serve the app shell from cache, refresh it in the background.
 // Bump CACHE when shipping changes that must replace old cached files immediately.
-const CACHE = 'utilitypulse-v1';
+const CACHE = 'utilitypulse-v2';
 const ASSETS = [
   './',
   'index.html',

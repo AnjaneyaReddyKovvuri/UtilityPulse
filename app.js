@@ -6,7 +6,9 @@ const UTILS = [
 const MAX_EMAILS = 3;
 const STORE_KEY = 'utilitypulse.v1';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LEGACY_TIME = '12:00';
 const EMAIL_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/;
+const readingId = (utility, date, time) => `${utility}-${date}T${time}`;
 
 const view = document.getElementById('view');
 const ui = { tab: 'home', utility: 'electricity', period: 'months', message: '', editing: null };
@@ -16,7 +18,7 @@ let state = load();
 
 function defaults() {
   return {
-    readings: [], // { id, utility, date: 'YYYY-MM-DD', value, reset }
+    readings: [], // { id, utility, date: 'YYYY-MM-DD', time: 'HH:MM', value, reset }
     settings: {
       emails: [],
       units: Object.fromEntries(UTILS.map((u) => [u.key, u.unit])),
@@ -29,7 +31,11 @@ function normalise(data) {
   if (!data || !Array.isArray(data.readings)) return base;
   base.readings = data.readings
     .filter((r) => UTILS.some((u) => u.key === r.utility) && /^\d{4}-\d{2}-\d{2}$/.test(r.date) && Number.isFinite(r.value))
-    .map((r) => ({ id: `${r.utility}-${r.date}`, utility: r.utility, date: r.date, value: r.value, reset: !!r.reset }));
+    .map((r) => {
+      // Readings saved before times were tracked are taken as read at midday.
+      const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(r.time) ? r.time : LEGACY_TIME;
+      return { id: readingId(r.utility, r.date, time), utility: r.utility, date: r.date, time, value: r.value, reset: !!r.reset };
+    });
   const s = data.settings || {};
   if (Array.isArray(s.emails)) base.settings.emails = s.emails.filter((e) => EMAIL_RE.test(e)).slice(0, MAX_EMAILS);
   for (const u of UTILS) if (s.units && s.units[u.key]) base.settings.units[u.key] = String(s.units[u.key]);
@@ -55,12 +61,22 @@ const unit = (key) => state.settings.units[key];
 const fmt = (n) => n.toLocaleString(undefined, { maximumFractionDigits: Math.abs(n) < 100 ? 2 : 1 });
 const monthLabel = (key) => `${MONTHS[Number(key.slice(5)) - 1]} ${key.slice(0, 4)}`;
 const dateLabel = (d) => `${Number(d.slice(8))} ${monthLabel(d.slice(0, 7))}`;
+const whenLabel = (r) => `${dateLabel(r.date)}, ${r.time}`;
+const pad2 = (n) => String(n).padStart(2, '0');
+// Partial periods can be covered by a fraction of a day; hide float noise from summing them.
+const isPartial = (days, full) => full - days > 1e-6;
 
 function today() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
+
+function nowTime() {
+  const d = new Date();
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+const inFuture = (date, time) => `${date}T${time}` > `${today()}T${nowTime()}`;
 
 function prevMonth(key) {
   const [y, m] = key.split('-').map(Number);
@@ -86,7 +102,7 @@ function alerts() {
   for (const u of UTILS) {
     const last = Calc.intervals(state.readings, u.key).at(-1);
     if (last && last.anomaly) {
-      out.push(`${u.name}: ${fmt(last.rate)} ${unit(u.key)}/day between ${dateLabel(last.from)} and ${dateLabel(last.to)} — ${last.anomaly.toFixed(1)}× your usual rate.`);
+      out.push(`${u.name}: ${fmt(last.rate)} ${unit(u.key)}/day between ${whenLabel(last.from)} and ${whenLabel(last.to)} — ${last.anomaly.toFixed(1)}× your usual rate.`);
     }
   }
   return out;
@@ -103,7 +119,7 @@ function homeView() {
   const month = today().slice(0, 7);
   const fields = UTILS.map((u) => {
     const last = Calc.sorted(state.readings, u.key).at(-1);
-    const hint = last ? `Last: ${fmt(last.value)} on ${dateLabel(last.date)}` : 'No readings yet';
+    const hint = last ? `Last: ${fmt(last.value)} on ${whenLabel(last)}` : 'No readings yet';
     return `<div class="field">
       <label for="in-${u.key}"><span class="name"><i class="dot" style="background:var(--c-${u.key})"></i>${u.name}</span>${hint}</label>
       <div class="with-unit"><input id="in-${u.key}" name="${u.key}" inputmode="decimal" autocomplete="off" placeholder="Meter reading"><span>${esc(unit(u.key))}</span></div>
@@ -128,7 +144,10 @@ function homeView() {
   return `${warn}
     <form class="card" id="reading-form">
       <h2>Enter meter readings</h2>
-      <div class="field"><label for="in-date">Date</label><input id="in-date" name="date" type="date" value="${today()}" max="${today()}" required></div>
+      <div class="row">
+        <div class="field"><label for="in-date">Date</label><input id="in-date" name="date" type="date" value="${today()}" max="${today()}" required></div>
+        <div class="field"><label for="in-time">Time</label><input id="in-time" name="time" type="time" value="${nowTime()}" required></div>
+      </div>
       ${fields}
       <button class="btn block">Save readings</button>
       <p class="muted" role="status" style="margin-top:10px">${esc(ui.message) || 'Fill in any of the three; leave the others blank.'}</p>
@@ -143,7 +162,7 @@ function periodRows(utility) {
   const t = Calc.totals(state.readings, utility)[ui.period];
   return Object.keys(t).sort().map((key) => {
     const full = ui.period === 'months' ? Calc.daysInMonth(key) : Calc.daysInYear(key);
-    return { key, label: ui.period === 'months' ? monthLabel(key) : key, ...t[key], full, partial: t[key].days < full };
+    return { key, label: ui.period === 'months' ? monthLabel(key) : key, ...t[key], full, partial: isPartial(t[key].days, full) };
   });
 }
 
@@ -205,7 +224,7 @@ function statsView() {
 
   const table = [...rows].reverse().map((r, i, all) =>
     `<tr><td>${r.label}</td><td>${fmt(r.usage)}</td><td>${fmt(perDay(r))}</td>
-      <td>${r.partial ? `${r.days} of ${r.full}` : r.days}</td>
+      <td>${r.partial ? `${fmt(r.days)} of ${r.full}` : r.full}</td>
       <td>${change(r, all[i + 1])}</td></tr>`).join('');
 
   return `<section class="card">
@@ -229,7 +248,7 @@ function selectBar(i) {
   view.querySelectorAll('[data-bar]').forEach((g) => g.classList.toggle('sel', Number(g.dataset.bar) === i));
   document.getElementById('readout').innerHTML =
     `<span><b>${fmt(r.usage)}</b> ${esc(unit(ui.utility))}</span>
-     <span class="muted">${r.label} · ${r.days ? `${fmt(perDay(r))}/day${r.partial ? ` · ${r.days} of ${r.full} days` : ''}` : 'no readings'}</span>`;
+     <span class="muted">${r.label} · ${r.days ? `${fmt(perDay(r))}/day${r.partial ? ` · ${fmt(r.days)} of ${r.full} days` : ''}` : 'no readings'}</span>`;
 }
 
 function historyView() {
@@ -239,24 +258,27 @@ function historyView() {
     const iv = byId[r.id];
     if (r.id === ui.editing) {
       return `<tr class="editing"><td colspan="5"><form id="edit-form">
-        <div class="field"><label for="edit-value">Reading on ${dateLabel(r.date)}</label>
-          <div class="with-unit"><input id="edit-value" name="reading" inputmode="decimal" autocomplete="off" value="${r.value}" required><span>${esc(unit(u.key))}</span></div></div>
+        <div class="row">
+          <div class="field"><label for="edit-value">Reading on ${dateLabel(r.date)}</label>
+            <div class="with-unit"><input id="edit-value" name="reading" inputmode="decimal" autocomplete="off" value="${r.value}" required><span>${esc(unit(u.key))}</span></div></div>
+          <div class="field"><label for="edit-time">Time</label><input id="edit-time" name="time" type="time" value="${r.time}" required></div>
+        </div>
         <div class="row"><button class="btn">Save</button><button type="button" class="btn plain" data-action="cancel-edit">Cancel</button></div>
         <p class="muted" role="status" style="margin-top:10px"></p>
       </form></td></tr>`;
     }
-    return `<tr><td>${dateLabel(r.date)}${r.reset ? '<div class="muted">new meter</div>' : ''}</td>
+    return `<tr><td>${dateLabel(r.date)}<div class="muted">${r.time}</div>${r.reset ? '<div class="muted">new meter</div>' : ''}</td>
       <td>${fmt(r.value)}</td>
       <td>${iv ? `+${fmt(iv.usage)}` : '–'}</td>
       <td>${iv ? `${fmt(iv.rate)}${iv.anomaly ? ' ⚠' : ''}` : '–'}</td>
-      <td class="actions"><button type="button" class="icon" data-edit="${r.id}" aria-label="Edit reading of ${dateLabel(r.date)}">✎</button><button type="button" class="icon" data-delete="${r.id}" aria-label="Delete reading of ${dateLabel(r.date)}">✕</button></td></tr>`;
+      <td class="actions"><button type="button" class="icon" data-edit="${r.id}" aria-label="Edit reading of ${whenLabel(r)}">✎</button><button type="button" class="icon" data-delete="${r.id}" aria-label="Delete reading of ${whenLabel(r)}">✕</button></td></tr>`;
   }).join('');
 
   return `<section class="card">
     ${utilityPicker()}
     ${rows
       ? `<table style="margin-top:12px"><tr><th>Date</th><th>Reading</th><th>Used</th><th>Per day</th><th></th></tr>${rows}</table>
-         <p class="muted" style="margin-top:8px">⚠ marks a daily rate more than 1.5× the recent norm. Tap ✎ to correct a reading.</p>`
+         <p class="muted" style="margin-top:8px">⚠ marks a daily rate more than 1.5× the recent norm. Tap ✎ to correct a reading or its time.</p>`
       : '<p class="muted" style="margin-top:16px">No readings yet.</p>'}
   </section>`;
 }
@@ -316,34 +338,36 @@ function parseReading(raw) {
 
 // Checks a reading against its neighbours in time. `original` is the reading being edited, if any.
 // Returns { error }, { reset } when it can be saved, or null if the user backed out.
-function checkReading(u, date, value, original) {
-  const others = Calc.sorted(state.readings, u.key).filter((r) => r.date !== date && r !== original);
-  const prev = others.filter((r) => r.date < date).at(-1);
-  const next = others.find((r) => r.date > date);
+function checkReading(u, date, time, value, original) {
+  const at = `${date}T${time}`;
+  const others = Calc.sorted(state.readings, u.key).filter((r) => Calc.stamp(r) !== at && r !== original);
+  const prev = others.filter((r) => Calc.stamp(r) < at).at(-1);
+  const next = others.find((r) => Calc.stamp(r) > at);
   let reset = false;
   if (prev && value < prev.value) {
     // Already saved as the start of a new meter: no need to ask again.
     if (!(original && original.reset)) {
       // A later reading that carries on from the old one means this is a typo, not a new meter.
       if (next && !next.reset && next.value >= prev.value) {
-        return { error: `${u.name}: ${value} is lower than the earlier reading (${prev.value} on ${dateLabel(prev.date)}).` };
+        return { error: `${u.name}: ${value} is lower than the earlier reading (${prev.value} on ${whenLabel(prev)}).` };
       }
-      const ok = confirm(`${u.name}: ${value} is lower than the previous reading (${prev.value} on ${dateLabel(prev.date)}).\n\n` +
+      const ok = confirm(`${u.name}: ${value} is lower than the previous reading (${prev.value} on ${whenLabel(prev)}).\n\n` +
         'Was the meter replaced or reset?\nOK – save it as the start of a new meter.\nCancel – go back and correct it.');
       if (!ok) return null;
     }
     reset = true;
   }
   if (next && !next.reset && value > next.value) {
-    return { error: `${u.name}: ${value} is higher than the later reading (${next.value} on ${dateLabel(next.date)}).` };
+    return { error: `${u.name}: ${value} is higher than the later reading (${next.value} on ${whenLabel(next)}).` };
   }
   return { reset };
 }
 
 function saveReadings(form) {
   const date = form.elements.date.value;
+  const time = form.elements.time.value.slice(0, 5);
   const fail = (msg) => formError(form, msg);
-  if (!date || date > today()) return fail('Pick a date that is not in the future.');
+  if (!date || !time || inFuture(date, time)) return fail('Pick a date and time that are not in the future.');
 
   const pending = [];
   for (const u of UTILS) {
@@ -351,17 +375,17 @@ function saveReadings(form) {
     if (!raw) continue;
     const value = parseReading(raw);
     if (Number.isNaN(value)) return fail(`${u.name}: "${raw}" is not a valid reading.`);
-    const res = checkReading(u, date, value);
+    const res = checkReading(u, date, time, value);
     if (!res) return;
     if (res.error) return fail(res.error);
-    pending.push({ id: `${u.key}-${date}`, utility: u.key, date, value, reset: res.reset });
+    pending.push({ id: readingId(u.key, date, time), utility: u.key, date, time, value, reset: res.reset });
   }
   if (!pending.length) return fail('Enter at least one reading.');
 
   const ids = new Set(pending.map((r) => r.id));
   state.readings = state.readings.filter((r) => !ids.has(r.id)).concat(pending);
   save();
-  ui.message = `Saved ${pending.length} reading${pending.length > 1 ? 's' : ''} for ${dateLabel(date)}.`;
+  ui.message = `Saved ${pending.length} reading${pending.length > 1 ? 's' : ''} for ${dateLabel(date)}, ${time}.`;
   render();
 }
 
@@ -376,11 +400,15 @@ function saveEdit(form) {
   const raw = form.elements.reading.value.trim();
   const value = parseReading(raw);
   if (Number.isNaN(value)) return fail(`"${raw}" is not a valid reading.`);
-  const res = checkReading(u, original.date, value, original);
+  const time = form.elements.time.value.slice(0, 5);
+  if (!time || inFuture(original.date, time)) return fail('Pick a time that is not in the future.');
+  const id = readingId(u.key, original.date, time);
+  if (state.readings.some((r) => r !== original && r.id === id)) return fail(`There is already a reading at ${time} that day.`);
+  const res = checkReading(u, original.date, time, value, original);
   if (!res) return;
   if (res.error) return fail(res.error);
 
-  Object.assign(original, { value, reset: res.reset });
+  Object.assign(original, { id, time, value, reset: res.reset });
   save();
   ui.editing = null;
   render();
@@ -410,14 +438,14 @@ function buildReport() {
     const un = unit(u.key);
     const last = Calc.sorted(state.readings, u.key).at(-1);
     const { months, years } = Calc.totals(state.readings, u.key);
-    const line = (label, p) => `${label}: ${p ? `${fmt(p.usage)} ${un} (${fmt(perDay(p))}/day over ${p.days} days)` : 'no data'}`;
+    const line = (label, p) => `${label}: ${p ? `${fmt(p.usage)} ${un} (${fmt(perDay(p))}/day over ${fmt(p.days)} days)` : 'no data'}`;
 
     lines.push(`${u.name.toUpperCase()} (${un})`);
     if (!last) {
       lines.push('No readings yet.', '');
       continue;
     }
-    lines.push(`Latest reading: ${fmt(last.value)} on ${dateLabel(last.date)}`);
+    lines.push(`Latest reading: ${fmt(last.value)} on ${whenLabel(last)}`);
     lines.push(line(`This month (${monthLabel(month)})`, months[month]));
     lines.push(line(`Last month (${monthLabel(prevMonth(month))})`, months[prevMonth(month)]));
     lines.push(line(`This year (${year})`, years[year]));
@@ -482,7 +510,7 @@ document.addEventListener('click', (e) => {
   if (d.action === 'import') return document.getElementById('import-file').click();
   if (d.delete) {
     const r = state.readings.find((x) => x.id === d.delete);
-    if (!r || !confirm(`Delete the reading of ${fmt(r.value)} on ${dateLabel(r.date)}?`)) return;
+    if (!r || !confirm(`Delete the reading of ${fmt(r.value)} on ${whenLabel(r)}?`)) return;
     state.readings = state.readings.filter((x) => x !== r);
     save();
   }
